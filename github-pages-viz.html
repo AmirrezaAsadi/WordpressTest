@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WordPress Core Review Network</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background: #f5f5f5;
+        }
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .visualization {
+            border: 1px solid #ccc;
+            border-radius: 8px;
+            padding: 16px;
+            background: white;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .legend {
+            margin-top: 16px;
+            font-size: 14px;
+            color: #666;
+            background: white;
+            padding: 16px;
+            border-radius: 8px;
+            border: 1px solid #ccc;
+        }
+        .legend p {
+            margin: 8px 0;
+        }
+        .controls {
+            margin: 16px 0;
+            padding: 16px;
+            background: white;
+            border-radius: 8px;
+            border: 1px solid #ccc;
+        }
+        button {
+            padding: 8px 16px;
+            margin-right: 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            background: white;
+            cursor: pointer;
+        }
+        button:hover {
+            background: #f0f0f0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2 style="font-size: 24px; font-weight: bold; margin-bottom: 16px;">WordPress Core Review Network</h2>
+        <div class="controls">
+            <button onclick="resetZoom()">Reset View</button>
+            <button onclick="toggleLabels()">Toggle Labels</button>
+        </div>
+        <div class="visualization">
+            <svg id="network" width="800" height="800"></svg>
+        </div>
+        <div class="legend">
+            <p>• Node size represents degree centrality (total number of connections)</p>
+            <p>• Curved edges show review relationships</p>
+            <p>• Thicker edges indicate more frequent reviews</p>
+            <p>• Drag nodes to explore relationships</p>
+            <p>• Zoom and pan to navigate the network</p>
+        </div>
+    </div>
+
+    <script>
+        let svg, transform;
+        async function createVisualization() {
+            // Load the data
+            const response = await fetch('data/review_relationships.csv');
+            const text = await response.text();
+            const result = Papa.parse(text, {
+                header: true,
+                dynamicTyping: true,
+                skipEmptyLines: true
+            });
+
+            // Process the data
+            const nodes = new Set();
+            const links = [];
+            const degreeCentrality = new Map();
+
+            result.data.forEach(row => {
+                if (row.reviewer && row.author) {
+                    nodes.add(row.reviewer);
+                    nodes.add(row.author);
+                    links.push({
+                        source: row.reviewer,
+                        target: row.author,
+                        value: 1
+                    });
+                }
+            });
+
+            // Calculate degree centrality
+            const nodeArray = Array.from(nodes);
+            nodeArray.forEach(node => {
+                const outDegree = result.data.filter(row => row.reviewer === node).length;
+                const inDegree = result.data.filter(row => row.author === node).length;
+                degreeCentrality.set(node, {
+                    inDegree,
+                    outDegree,
+                    total: inDegree + outDegree
+                });
+            });
+
+            // Prepare the data
+            const graphData = {
+                nodes: Array.from(nodes).map(id => ({
+                    id,
+                    degreeCentrality: degreeCentrality.get(id).total,
+                })),
+                links: Array.from(d3.group(links, d => `${d.source}-${d.target}`),
+                    ([key, group]) => ({
+                        source: group[0].source,
+                        target: group[0].target,
+                        value: group.length
+                    })
+                )
+            };
+
+            // Create the visualization
+            const width = 800;
+            const height = 800;
+            svg = d3.select('#network');
+
+            // Create size scale
+            const sizeScale = d3.scaleLinear()
+                .domain([0, d3.max(graphData.nodes, d => d.degreeCentrality)])
+                .range([3, 10]);
+
+            // Create force simulation
+            const simulation = d3.forceSimulation(graphData.nodes)
+                .force('charge', d3.forceManyBody().strength(-100))
+                .force('center', d3.forceCenter(width / 2, height / 2))
+                .force('link', d3.forceLink(graphData.links)
+                    .id(d => d.id)
+                    .distance(100)
+                    .strength(d => 1 / Math.sqrt(d.value)))
+                .force('collide', d3.forceCollide().radius(d => sizeScale(d.degreeCentrality) + 2));
+
+            // Create groups for links and nodes
+            const linkGroup = svg.append('g');
+            const nodeGroup = svg.append('g');
+
+            // Create links
+            const linkElements = linkGroup
+                .selectAll('path')
+                .data(graphData.links)
+                .join('path')
+                .attr('stroke', '#999')
+                .attr('stroke-opacity', 0.3)
+                .attr('stroke-width', d => Math.sqrt(d.value))
+                .attr('fill', 'none');
+
+            // Create nodes
+            const nodeElements = nodeGroup
+                .selectAll('g')
+                .data(graphData.nodes)
+                .join('g')
+                .call(d3.drag()
+                    .on('start', dragstarted)
+                    .on('drag', dragged)
+                    .on('end', dragended));
+
+            nodeElements.append('circle')
+                .attr('r', d => sizeScale(d.degreeCentrality))
+                .attr('fill', '#1f77b4')
+                .attr('fill-opacity', 0.7)
+                .on('mouseover', function(event, d) {
+                    // Highlight connected nodes
+                    const connectedNodes = new Set();
+                    graphData.links.forEach(link => {
+                        if (link.source.id === d.id) connectedNodes.add(link.target.id);
+                        if (link.target.id === d.id) connectedNodes.add(link.source.id);
+                    });
+                    
+                    nodeElements.selectAll('circle')
+                        .attr('fill-opacity', node => 
+                            node.id === d.id || connectedNodes.has(node.id) ? 1 : 0.2);
+                    
+                    linkElements
+                        .attr('stroke-opacity', link => 
+                            link.source.id === d.id || link.target.id === d.id ? 0.8 : 0.1);
+                })
+                .on('mouseout', function() {
+                    nodeElements.selectAll('circle').attr('fill-opacity', 0.7);
+                    linkElements.attr('stroke-opacity', 0.3);
+                });
+
+            nodeElements.append('title')
+                .text(d => `${d.id}\nDegree: ${d.degreeCentrality}`);
+
+            // Add labels for high-degree nodes
+            const labels = nodeElements.filter(d => d.degreeCentrality > 50)
+                .append('text')
+                .attr('class', 'node-label')
+                .attr('x', 6)
+                .attr('y', 3)
+                .text(d => d.id)
+                .attr('font-size', '8px');
+
+            // Update positions on tick
+            simulation.on('tick', () => {
+                linkElements.attr('d', d => {
+                    const dx = d.target.x - d.source.x;
+                    const dy = d.target.y - d.source.y;
+                    const dr = Math.sqrt(dx * dx + dy * dy) * 2;
+                    return `M${d.source.x},${d.source.y}A${dr},${dr} 0 0,1 ${d.target.x},${d.target.y}`;
+                });
+
+                nodeElements.attr('transform', d => `translate(${d.x},${d.y})`);
+            });
+
+            // Drag functions
+            function dragstarted(event, d) {
+                if (!event.active) simulation.alphaTarget(0.3).restart();
+                d.fx = d.x;
+                d.fy = d.y;
+            }
+
+            function dragged(event, d) {
+                d.fx = event.x;
+                d.fy = event.y;
+            }
+
+            function dragended(event, d) {
+                if (!event.active) simulation.alphaTarget(0);
+                d.fx = null;
+                d.fy = null;
+            }
+
+            // Add zoom
+            const zoom = d3.zoom()
+                .extent([[0, 0], [width, height]])
+                .scaleExtent([0.1, 4])
+                .on('zoom', ({transform}) => {
+                    nodeGroup.attr('transform', transform);
+                    linkGroup.attr('transform', transform);
+                });
+
+            svg.call(zoom);
+            transform = zoom;
+        }
+
+        // Initialize the visualization
+        createVisualization();
+
+        // Control functions
+        function resetZoom() {
+            svg.transition()
+                .duration(750)
+                .call(transform.transform, d3.zoomIdentity);
+        }
+
+        function toggleLabels() {
+            const labels = d3.selectAll('.node-label');
+            const currentOpacity = labels.style('opacity');
+            labels.style('opacity', currentOpacity == 1 ? 0 : 1);
+        }
+    </script>
+</body>
+</html>
