@@ -78,7 +78,7 @@
         let svg, transform;
         async function createVisualization() {
             // Load the data
-            const response = await fetch('Data/review_relationships.csv');
+            const response = await fetch('review_relationships.csv');
             const text = await response.text();
             const result = Papa.parse(text, {
                 header: true,
